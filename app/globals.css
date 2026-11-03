@@ -44,7 +44,7 @@ h2 { font-size: 0.8rem; margin: 0 0 12px; color: var(--muted); text-transform: u
 .grid.two { grid-template-columns: 1fr 1fr; }
 .grid.three { grid-template-columns: 1fr 1fr 1fr; }
 
-button, input {
+button, input, select {
   font: inherit;
   color: inherit;
   min-height: 48px;
@@ -53,7 +53,9 @@ button, input {
   background: var(--bg);
   padding: 0 12px;
 }
-input { width: 100%; }
+input, select { width: 100%; }
+label.field { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 0.85rem; }
+select { text-transform: capitalize; }
 button { cursor: pointer; }
 button.on, button.primary, a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button:disabled { opacity: 0.5; }

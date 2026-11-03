@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { MAX_TEXT, MODES, MOODS, type State } from "@/lib/schema";
+import { ANIMS, MAX_CAPTION, MAX_TEXT, MODES, MOODS, type State } from "@/lib/schema";
 
 const MODE_LABELS: Record<State["mode"], string> = {
   eyes: "👀 Eyes",
@@ -106,6 +106,35 @@ export default function Controls({
             maxLength={MAX_TEXT}
             placeholder="What should it say?"
             onChange={(e) => setState({ ...state, text: e.target.value })}
+          />
+          <label className="field">
+            Animation
+            <select value={state.anim} onChange={(e) => save({ ...state, anim: e.target.value as State["anim"] })}>
+              {ANIMS.map((a) => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button className="primary">Send</button>
+        </form>
+      )}
+
+      {state.mode === "clock" && (
+        <form
+          className="card"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save(state);
+          }}
+        >
+          <h2>Caption</h2>
+          <input
+            value={state.caption}
+            maxLength={MAX_CAPTION}
+            placeholder="Shown under the date (optional)"
+            onChange={(e) => setState({ ...state, caption: e.target.value })}
           />
           <button className="primary">Send</button>
         </form>
