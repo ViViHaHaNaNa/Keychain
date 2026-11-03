@@ -5,6 +5,13 @@ const REFRESH_KEY = "spotify:refresh_token";
 const ACCESS_KEY = "spotify:access_token";
 const NOW_PLAYING_KEY = "spotify:now_playing";
 
+export type NowPlaying = {
+  text: string; // "Title - Artist", or a short status message
+  title: string;
+  artist: string;
+  artUrl: string; // Spotify image URL, "" when there is none
+};
+
 function basicAuth() {
   const id = process.env.SPOTIFY_CLIENT_ID;
   const secret = process.env.SPOTIFY_CLIENT_SECRET;
@@ -64,35 +71,45 @@ async function accessToken() {
   return token.access_token;
 }
 
-// Returns "Title - Artist" for the current track, or a short status message.
-// The result is cached for a few seconds so ESP32 polling doesn't hammer Spotify.
-export async function nowPlayingText(): Promise<string> {
-  const cached = await redis.get<string>(NOW_PLAYING_KEY);
-  if (cached !== null) return cached;
+const status = (msg: string): NowPlaying => ({ text: msg, title: msg, artist: "", artUrl: "" });
+const clip = (s: string) => (s.length > MAX_TEXT ? s.slice(0, MAX_TEXT - 1) + "…" : s);
 
-  let text: string;
+// Short id for an album image, sent to the ESP32 so it only re-downloads art when it changes.
+export const artId = (artUrl: string) => artUrl.split("/").pop() ?? "";
+
+// The result is cached for a few seconds so ESP32 polling doesn't hammer Spotify.
+export async function getNowPlaying(): Promise<NowPlaying> {
+  const cached = await redis.get<NowPlaying>(NOW_PLAYING_KEY);
+  if (cached && typeof cached === "object") return cached;
+
+  let result: NowPlaying;
   try {
     const token = await accessToken();
-    if (!token) return "Spotify not connected";
+    if (!token) return status("Spotify not connected");
     const res = await fetch("https://api.spotify.com/v1/me/player/currently-playing", {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (res.status === 204) {
-      text = "Nothing playing";
+      result = status("Nothing playing");
     } else if (!res.ok) {
-      return "Spotify error";
+      return status("Spotify error");
     } else {
-      const data = await res.json();
-      const item = data?.item;
-      text = item?.name
-        ? `${item.name} - ${(item.artists ?? []).map((a: { name: string }) => a.name).join(", ")}`
-        : "Nothing playing";
+      const item = (await res.json())?.item;
+      if (!item?.name) {
+        result = status("Nothing playing");
+      } else {
+        const title = clip(item.name);
+        const artist = clip((item.artists ?? []).map((a: { name: string }) => a.name).join(", "));
+        // images are listed largest first; the middle one (~300px) is plenty for 64x64
+        const images: { url: string }[] = item.album?.images ?? [];
+        const artUrl = (images[1] ?? images[0])?.url ?? "";
+        result = { text: clip(`${title} - ${artist}`), title, artist, artUrl };
+      }
     }
   } catch {
-    return "Spotify error";
+    return status("Spotify error");
   }
 
-  text = text.length > MAX_TEXT ? text.slice(0, MAX_TEXT - 1) + "…" : text;
-  await redis.set(NOW_PLAYING_KEY, text, { ex: 5 });
-  return text;
+  await redis.set(NOW_PLAYING_KEY, result, { ex: 5 });
+  return result;
 }

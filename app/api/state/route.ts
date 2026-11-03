@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { safeEqual } from "@/lib/auth";
-import { nowPlayingText } from "@/lib/spotify";
+import { artId, getNowPlaying } from "@/lib/spotify";
 import { getState } from "@/lib/state";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +13,14 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   const state = await getState();
-  // In spotify mode the server fills `text` with the current track.
-  if (state.mode === "spotify") state.text = await nowPlayingText();
-  return NextResponse.json(state, { headers: { "Cache-Control": "no-store" } });
+  const headers = { "Cache-Control": "no-store" };
+  if (state.mode !== "spotify") return NextResponse.json(state, { headers });
+
+  // In spotify mode the server fills in the current track. `art` changes whenever
+  // the album art does; fetch /api/art only when it differs from the last one.
+  const np = await getNowPlaying();
+  return NextResponse.json(
+    { ...state, text: np.text, title: np.title, artist: np.artist, art: artId(np.artUrl) },
+    { headers },
+  );
 }
