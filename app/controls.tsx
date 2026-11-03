@@ -1,0 +1,94 @@
+"use client";
+
+import { useState } from "react";
+import { MAX_TEXT, MODES, MOODS, type State } from "@/lib/schema";
+
+const MODE_LABELS: Record<State["mode"], string> = { eyes: "👀 Eyes", clock: "🕒 Clock", text: "✏️ Text" };
+const MOOD_LABELS: Record<State["mood"], string> = {
+  happy: "😊 Happy",
+  sad: "😢 Sad",
+  angry: "😠 Angry",
+  sleepy: "😴 Sleepy",
+  surprised: "😮 Surprised",
+  neutral: "😐 Neutral",
+};
+
+export default function Controls({ initial }: { initial: State }) {
+  const [state, setState] = useState(initial);
+  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+
+  async function save(next: State) {
+    setState(next);
+    setStatus("saving");
+    const res = await fetch("/api/mode", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(next),
+    });
+    if (res.status === 401) return location.reload();
+    setStatus(res.ok ? "saved" : "error");
+  }
+
+  async function logout() {
+    await fetch("/api/login", { method: "DELETE" });
+    location.reload();
+  }
+
+  return (
+    <main>
+      <h1>Keychain</h1>
+
+      <section className="card">
+        <h2>Mode</h2>
+        <div className="grid three">
+          {MODES.map((m) => (
+            <button key={m} className={state.mode === m ? "on" : ""} onClick={() => save({ ...state, mode: m })}>
+              {MODE_LABELS[m]}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {state.mode === "eyes" && (
+        <section className="card">
+          <h2>Mood</h2>
+          <div className="grid two">
+            {MOODS.map((m) => (
+              <button key={m} className={state.mood === m ? "on" : ""} onClick={() => save({ ...state, mood: m })}>
+                {MOOD_LABELS[m]}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {state.mode === "text" && (
+        <form
+          className="card"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save(state);
+          }}
+        >
+          <h2>Text</h2>
+          <input
+            value={state.text}
+            maxLength={MAX_TEXT}
+            placeholder="What should it say?"
+            onChange={(e) => setState({ ...state, text: e.target.value })}
+          />
+          <button className="primary">Send</button>
+        </form>
+      )}
+
+      <p className="status" aria-live="polite">
+        {status === "saving" && "Saving…"}
+        {status === "saved" && "Saved ✓"}
+        {status === "error" && "Couldn't save — try again"}
+      </p>
+      <button className="link" onClick={logout}>
+        Log out
+      </button>
+    </main>
+  );
+}
