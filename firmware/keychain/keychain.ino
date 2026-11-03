@@ -16,6 +16,7 @@
 #include <Wire.h>
 #include <time.h>
 
+#include "Silkscreen8pt7b.h"
 #include "secrets.h"
 
 // Optional in secrets.h: a second network (your phone hotspot) tried when the saved one fails.
@@ -342,8 +343,8 @@ void drawText(const String& text) {
   display.print(text);
 }
 
-// Draws one line in the 60px column right of the art (x=68). Text shrinks to fit: the normal
-// 6px/char font first, then a 4px/char font. Only if it still doesn't fit does it scroll.
+// Draws one line in the 60px column right of the art (x=68). Text shrinks to fit: Silkscreen
+// first, then the smaller Picopixel. Only if it still doesn't fit does it scroll.
 void fitLine(const String& s, int y, uint32_t now) {
   constexpr int W = 60;
   int16_t bx, by;
@@ -354,11 +355,10 @@ void fitLine(const String& s, int y, uint32_t now) {
   marqueeLine.setTextSize(1);
   marqueeLine.setTextWrap(false);
 
-  int baseline = 0;  // the built-in font draws from the top, GFX fonts from the baseline
-  marqueeLine.setFont(nullptr);
-  marqueeLine.getTextBounds(s, 0, 0, &bx, &by, &tw, &th);
+  const int baseline = 7;  // GFX fonts draw from the baseline; caps sit on rows 2-6 of the 8px line
+  marqueeLine.setFont(&Silkscreen8pt7b);
+  marqueeLine.getTextBounds(s, 0, baseline, &bx, &by, &tw, &th);
   if (tw > W) {
-    baseline = 6;
     marqueeLine.setFont(&Picopixel);
     marqueeLine.getTextBounds(s, 0, baseline, &bx, &by, &tw, &th);
   }
@@ -409,9 +409,11 @@ void drawSpotify(uint32_t now) {
     display.setTextSize(1);
   }
 
-  display.setCursor(68, 2);
+  display.drawChar(120, 2, 13, SSD1306_WHITE, SSD1306_BLACK, 1);  // note glyph (built-in font)
+  display.setFont(&Silkscreen8pt7b);
+  display.setCursor(68, 8);
   display.print("LISTENING");
-  display.drawChar(122, 2, 13, SSD1306_WHITE, SSD1306_BLACK, 1);  // note glyph
+  display.setFont(nullptr);
 
   fitLine(view.title, 20, now);
   if (view.artist.length()) fitLine(view.artist, 34, now);
