@@ -72,7 +72,15 @@ async function accessToken() {
 }
 
 const status = (msg: string): NowPlaying => ({ text: msg, title: msg, artist: "", artUrl: "" });
-const clip = (s: string) => (s.length > MAX_TEXT ? s.slice(0, MAX_TEXT - 1) + "…" : s);
+// The OLED font is ASCII-only: strip accents (é -> e) and straighten curly quotes.
+const fold = (s: string) =>
+  s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—]/g, "-");
+const clip = (s: string) => (s.length > MAX_TEXT ? s.slice(0, MAX_TEXT - 3) + "..." : s);
 
 // Short id for an album image, sent to the ESP32 so it only re-downloads art when it changes.
 export const artId = (artUrl: string) => artUrl.split("/").pop() ?? "";
@@ -98,8 +106,8 @@ export async function getNowPlaying(): Promise<NowPlaying> {
       if (!item?.name) {
         result = status("Nothing playing");
       } else {
-        const title = clip(item.name);
-        const artist = clip((item.artists ?? []).map((a: { name: string }) => a.name).join(", "));
+        const title = clip(fold(item.name));
+        const artist = clip(fold((item.artists ?? []).map((a: { name: string }) => a.name).join(", ")));
         // images are listed largest first; the middle one (~300px) is plenty for 64x64
         const images: { url: string }[] = item.album?.images ?? [];
         const artUrl = (images[1] ?? images[0])?.url ?? "";

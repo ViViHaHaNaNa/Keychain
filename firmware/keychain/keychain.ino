@@ -1,6 +1,9 @@
-// Stage 1: Wi-Fi + fetch + mode switch, with plain text on the OLED.
+// Keychain display: animated eyes, clock, custom text, Spotify now-playing with album art.
 // Libraries (Library Manager): Adafruit SSD1306, Adafruit GFX, WiFiManager (tzapu), ArduinoJson (v7).
 // Board: "ESP32 Dev Module". OLED: SSD1306 128x64, I2C 0x3C, SDA=21, SCL=22.
+//
+// Networking runs in its own task so the animation never freezes while a request is in flight.
+// Hold the BOOT button for 3 seconds to forget the saved Wi-Fi and reopen the setup hotspot.
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -10,15 +13,28 @@
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
 #include <Wire.h>
+#include <time.h>
 
 #include "secrets.h"
 
+// Optional in secrets.h: a second network (your phone hotspot) tried when the saved one fails.
+#ifndef HOTSPOT_SSID
+#define HOTSPOT_SSID ""
+#define HOTSPOT_PASS ""
+#endif
+#ifndef TZ_OFFSET_SEC
+#define TZ_OFFSET_SEC 19800  // IST (UTC+5:30); change in secrets.h for other zones
+#endif
+
 constexpr uint8_t OLED_ADDR = 0x3C;
 constexpr uint32_t POLL_MS = 4000;
-constexpr uint32_t RECONNECT_MS = 30000;
+constexpr uint32_t RECONNECT_MS = 10000;
+constexpr uint32_t FRAME_MS = 33;
 constexpr uint8_t FAIL_LIMIT = 3;  // failed polls before falling back to eyes
+constexpr size_t ART_BYTES = 512;  // 64x64, 1 bit per pixel
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
+GFXcanvas1 marqueeLine(60, 8);
 
 struct State {
   String mode = "eyes";
@@ -29,42 +45,67 @@ struct State {
   String art;
 };
 
-State state;
-uint8_t failures = FAIL_LIMIT;  // start in fallback until the first fetch works
-uint32_t lastPoll = 0;
-uint32_t lastReconnect = 0;
+// Written by the network task, copied into the view* variables by the render loop.
+SemaphoreHandle_t mu;
+State shared;
+bool sharedOnline = false;
+uint32_t sharedVersion = 0;
+uint8_t sharedArt[ART_BYTES];
+bool sharedArtValid = false;
+uint32_t sharedArtVersion = 0;
 
-void show(const String& l1, const String& l2 = "", const String& l3 = "", const String& l4 = "") {
+State view;
+bool viewOnline = false;
+uint32_t viewVersion = 0;
+uint8_t viewArt[ART_BYTES];
+bool viewArtValid = false;
+uint32_t viewArtVersion = 0;
+
+// ---------- small helpers ----------
+
+void show(const String& l1, const String& l2 = "", const String& l3 = "") {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  const String* lines[] = {&l1, &l2, &l3, &l4};
-  for (int i = 0; i < 4; i++) {
-    display.setCursor(0, i * 16);
-    display.print(*lines[i]);
-  }
+  display.setCursor(0, 0);
+  display.println(l1);
+  display.setCursor(0, 16);
+  display.println(l2);
+  display.setCursor(0, 32);
+  display.println(l3);
   display.display();
 }
 
-bool fetchState() {
-  if (WiFi.status() != WL_CONNECTED) return false;
+// The built-in font only has ASCII/CP437; drop UTF-8 bytes so you don't get garbage glyphs.
+String ascii(const String& s) {
+  String out;
+  for (size_t i = 0; i < s.length(); i++) {
+    if ((uint8_t)s[i] < 0x7F) out += s[i];
+  }
+  return out;
+}
 
+// ---------- networking ----------
+
+String url(const char* path) { return String(SITE_URL) + path + "?key=" + DEVICE_KEY; }
+
+bool fetchState(State& s) {
   WiFiClientSecure client;
   client.setInsecure();  // hobby project: skips certificate checking
   HTTPClient http;
   http.setTimeout(8000);
-  if (!http.begin(client, String(SITE_URL) + "/api/state?key=" + DEVICE_KEY)) return false;
+  if (!http.begin(client, url("/api/state"))) return false;
 
   bool ok = false;
   if (http.GET() == 200) {
     JsonDocument doc;
     if (!deserializeJson(doc, http.getString())) {
-      state.mode = doc["mode"] | "eyes";
-      state.mood = doc["mood"] | "neutral";
-      state.text = doc["text"] | "";
-      state.title = doc["title"] | "";
-      state.artist = doc["artist"] | "";
-      state.art = doc["art"] | "";
+      s.mode = doc["mode"] | "eyes";
+      s.mood = doc["mood"] | "neutral";
+      s.text = ascii(doc["text"] | "");
+      s.title = ascii(doc["title"] | "");
+      s.artist = ascii(doc["artist"] | "");
+      s.art = doc["art"] | "";
       ok = true;
     }
   }
@@ -72,62 +113,329 @@ bool fetchState() {
   return ok;
 }
 
-void render() {
-  // No Wi-Fi or repeated request failures: fall back to eyes.
-  if (failures >= FAIL_LIMIT) {
-    show("EYES", "(offline)");
+bool fetchArt(uint8_t* out) {
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(10000);
+  if (!http.begin(client, url("/api/art"))) return false;
+
+  bool ok = false;
+  if (http.GET() == 200) {
+    String body = http.getString();  // handles chunked responses; binary-safe by length
+    if (body.length() == ART_BYTES) {
+      memcpy(out, body.c_str(), ART_BYTES);
+      ok = true;
+    }
+  }
+  http.end();
+  return ok;
+}
+
+void netTask(void*) {
+  String loadedArt;
+  uint8_t fails = 0;
+  uint8_t artBuf[ART_BYTES];
+
+  for (;;) {
+    if (WiFi.status() != WL_CONNECTED) {
+      xSemaphoreTake(mu, portMAX_DELAY);
+      sharedOnline = false;
+      sharedVersion++;
+      xSemaphoreGive(mu);
+      WiFi.reconnect();
+      vTaskDelay(pdMS_TO_TICKS(RECONNECT_MS));
+      continue;
+    }
+
+    State s;
+    bool ok = fetchState(s);
+    bool gotArt = false, clearArt = false;
+    if (ok && s.mode == "spotify") {
+      if (s.art.length() == 0) {
+        if (loadedArt.length()) {
+          loadedArt = "";
+          clearArt = true;
+        }
+      } else if (s.art != loadedArt && fetchArt(artBuf)) {
+        loadedArt = s.art;
+        gotArt = true;
+      }
+    }
+
+    xSemaphoreTake(mu, portMAX_DELAY);
+    if (ok) {
+      shared = s;
+      sharedOnline = true;
+      fails = 0;
+    } else if (fails < 255 && ++fails >= FAIL_LIMIT) {
+      sharedOnline = false;
+    }
+    if (gotArt) {
+      memcpy(sharedArt, artBuf, ART_BYTES);
+      sharedArtValid = true;
+      sharedArtVersion++;
+    } else if (clearArt) {
+      sharedArtValid = false;
+      sharedArtVersion++;
+    }
+    sharedVersion++;
+    xSemaphoreGive(mu);
+
+    Serial.printf("poll ok=%d mode=%s mood=%s title=%s art=%s\n", ok, s.mode.c_str(), s.mood.c_str(),
+                  s.title.c_str(), s.art.c_str());
+    vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+  }
+}
+
+bool waitConnected(uint32_t ms) {
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < ms) delay(250);
+  return WiFi.status() == WL_CONNECTED;
+}
+
+void connectWifi() {
+  WiFi.mode(WIFI_STA);
+  show("Connecting...");
+
+  WiFi.begin();  // last saved network
+  if (waitConnected(10000)) return;
+
+  if (strlen(HOTSPOT_SSID)) {
+    show("Connecting...", HOTSPOT_SSID);
+    WiFi.persistent(false);  // don't overwrite the saved home network
+    WiFi.begin(HOTSPOT_SSID, HOTSPOT_PASS);
+    const bool ok = waitConnected(10000);
+    WiFi.persistent(true);
+    if (ok) return;
+  }
+
+  // Nothing worked: open the "Keychain-Setup" hotspot so a network can be picked from a phone.
+  show("Wi-Fi setup:", "join Keychain-Setup", "then open 192.168.4.1");
+  WiFiManager wm;
+  wm.setConnectTimeout(15);
+  wm.setConfigPortalTimeout(120);
+  wm.autoConnect("Keychain-Setup");
+}
+
+void checkResetButton(uint32_t now) {
+  static uint32_t downSince = 0;
+  if (digitalRead(0) == LOW) {  // BOOT button
+    if (!downSince) downSince = now;
+    if (now - downSince > 3000) {
+      show("Forgetting Wi-Fi...");
+      WiFiManager wm;
+      wm.resetSettings();
+      delay(500);
+      ESP.restart();
+    }
+  } else {
+    downSince = 0;
+  }
+}
+
+// ---------- drawing ----------
+
+struct {
+  float lookX = 0, lookY = 0, targetX = 0, targetY = 0;
+  uint32_t nextLook = 0, nextBlink = 2000, blinkStart = 0;
+  bool blinking = false;
+} eyes;
+
+void drawEyes(const String& mood, uint32_t now) {
+  const bool surprised = mood == "surprised";
+  const bool sleepy = mood == "sleepy";
+
+  if (now >= eyes.nextLook) {
+    eyes.targetX = random(-8, 9);
+    eyes.targetY = random(-4, 5);
+    if (surprised) {
+      eyes.targetX /= 3;
+      eyes.targetY /= 3;
+    }
+    eyes.nextLook = now + random(1200, 3500);
+  }
+  eyes.lookX += (eyes.targetX - eyes.lookX) * 0.25f;
+  eyes.lookY += (eyes.targetY - eyes.lookY) * 0.25f;
+
+  float open = 1.0f;
+  if (!eyes.blinking && now >= eyes.nextBlink) {
+    eyes.blinking = true;
+    eyes.blinkStart = now;
+  }
+  if (eyes.blinking) {
+    const float t = (now - eyes.blinkStart) / (sleepy ? 400.0f : 180.0f);
+    if (t >= 1.0f) {
+      eyes.blinking = false;
+      eyes.nextBlink = now + random(2000, 6000);
+    } else {
+      open = fabsf(1.0f - 2.0f * t);
+    }
+  }
+
+  const int w = surprised ? 40 : 36;
+  const int h = surprised ? 48 : 40;
+  const int he = max(4, (int)(h * open));
+  const int r = min(10, he / 2);
+
+  for (int e = 0; e < 2; e++) {
+    const bool left = e == 0;
+    const int cx = (left ? 34 : 94) + (int)eyes.lookX;
+    const int x = cx - w / 2;
+    const int y = 32 + (int)eyes.lookY - he / 2;
+    display.fillRoundRect(x, y, w, he, r, SSD1306_WHITE);
+    if (open < 0.6f) continue;  // lids only matter while the eye is open
+
+    if (mood == "angry") {  // inner corners lower
+      display.fillTriangle(x - 1, y - 1, x + w + 1, y - 1, left ? x + w + 1 : x - 1, y + he / 2, SSD1306_BLACK);
+    } else if (mood == "sad") {  // outer corners lower
+      display.fillTriangle(x - 1, y - 1, x + w + 1, y - 1, left ? x - 1 : x + w + 1, y + he / 2, SSD1306_BLACK);
+    } else if (sleepy) {
+      display.fillRect(x - 1, y - 1, w + 2, he / 2 + 1, SSD1306_BLACK);
+    } else if (mood == "happy") {  // cheek pushes up from below: ^ ^ shape
+      const int cr = (int)(w * 0.62f);
+      display.fillCircle(cx, y + he - (int)(he * 0.38f) + cr, cr, SSD1306_BLACK);
+    }
+  }
+}
+
+void drawClock() {
+  struct tm t;
+  display.setTextColor(SSD1306_WHITE);
+  if (!getLocalTime(&t, 0)) {
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("Syncing time...");
     return;
   }
-  if (state.mode == "eyes") {
-    show("EYES", state.mood);
-  } else if (state.mode == "clock") {
-    show("CLOCK", "(coming soon)");
-  } else if (state.mode == "text") {
-    show(state.text);
-  } else if (state.mode == "spotify") {
-    show(state.title, state.artist);
-  } else {
-    show("EYES", "(unknown mode)");
+  char buf[6];
+  snprintf(buf, sizeof buf, "%02d%c%02d", t.tm_hour, (t.tm_sec % 2) ? ' ' : ':', t.tm_min);
+  display.setTextSize(4);
+  display.setCursor(4, 6);
+  display.print(buf);
+
+  char date[16];
+  strftime(date, sizeof date, "%a %d %b", &t);
+  display.setTextSize(2);
+  display.setCursor(4, 46);
+  display.print(date);
+}
+
+void drawText(const String& text) {
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  if (text.length() == 0) {
+    display.setTextSize(1);
+    display.print("(no text set)");
+    return;
   }
+  display.setTextSize(text.length() <= 40 ? 2 : 1);
+  display.print(text);
+}
+
+// Draws one 60px-wide line of text at x=68, scrolling it when it doesn't fit.
+void marquee(const String& s, int y, uint32_t now) {
+  constexpr int W = 60;
+  const int textW = s.length() * 6;
+  marqueeLine.fillScreen(0);
+  marqueeLine.setTextSize(1);
+  marqueeLine.setTextColor(1);
+  marqueeLine.setTextWrap(false);
+  if (textW <= W) {
+    marqueeLine.setCursor(0, 0);
+    marqueeLine.print(s);
+  } else {
+    const int span = textW + 24;
+    const int off = (now / 50) % span;
+    marqueeLine.setCursor(-off, 0);
+    marqueeLine.print(s);
+    marqueeLine.setCursor(-off + span, 0);
+    marqueeLine.print(s);
+  }
+  display.drawBitmap(68, y, marqueeLine.getBuffer(), W, 8, SSD1306_WHITE, SSD1306_BLACK);
+}
+
+void drawSpotify(uint32_t now) {
+  // Status messages ("Nothing playing", ...) have no artist: show them full width.
+  if (view.artist.length() == 0) {
+    drawText(view.title);
+    return;
+  }
+  if (viewArtValid) {
+    display.drawBitmap(0, 0, viewArt, 64, 64, SSD1306_WHITE);
+  } else {
+    display.drawRect(0, 0, 64, 64, SSD1306_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(68, 2);
+  display.print("PLAYING");
+  marquee(view.title, 20, now);
+  marquee(view.artist, 34, now);
+}
+
+// ---------- main ----------
+
+void syncView() {
+  if (xSemaphoreTake(mu, 0) != pdTRUE) return;
+  if (sharedVersion != viewVersion) {
+    view = shared;
+    viewOnline = sharedOnline;
+    viewVersion = sharedVersion;
+  }
+  if (sharedArtVersion != viewArtVersion) {
+    memcpy(viewArt, sharedArt, ART_BYTES);
+    viewArtValid = sharedArtValid;
+    viewArtVersion = sharedArtVersion;
+  }
+  xSemaphoreGive(mu);
 }
 
 void setup() {
   Serial.begin(115200);
+  pinMode(0, INPUT_PULLUP);
   Wire.begin(21, 22);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     Serial.println("OLED not found");
     for (;;) delay(1000);
   }
-  show("Connecting...");
+  Wire.setClock(400000);
+  randomSeed(esp_random());
+  mu = xSemaphoreCreateMutex();
 
-  // Joins the saved network; otherwise opens a "Keychain-Setup" hotspot so you can
-  // pick a network (e.g. your phone hotspot) from your phone. Gives up after 2 minutes.
-  WiFiManager wm;
-  wm.setConnectTimeout(15);
-  wm.setConfigPortalTimeout(120);
-  show("Wi-Fi setup:", "join Keychain-Setup", "on your phone");
-  wm.autoConnect("Keychain-Setup");
-
-  lastReconnect = millis();
+  connectWifi();
+  configTime(TZ_OFFSET_SEC, 0, "pool.ntp.org", "time.google.com");
+  xTaskCreatePinnedToCore(netTask, "net", 16384, nullptr, 1, nullptr, 0);
 }
 
 void loop() {
+  static uint32_t lastFrame = 0;
+  static String lastMood;
   const uint32_t now = millis();
 
-  if (WiFi.status() != WL_CONNECTED && now - lastReconnect >= RECONNECT_MS) {
-    lastReconnect = now;
-    WiFi.reconnect();
+  checkResetButton(now);
+  if (now - lastFrame < FRAME_MS) {
+    delay(1);
+    return;
   }
+  lastFrame = now;
+  syncView();
 
-  if (now - lastPoll >= POLL_MS || lastPoll == 0) {
-    lastPoll = now;
-    if (fetchState()) {
-      failures = 0;
-    } else if (failures < FAIL_LIMIT) {
-      failures++;
+  display.clearDisplay();
+  if (viewOnline && view.mode == "clock") {
+    drawClock();
+  } else if (viewOnline && view.mode == "text") {
+    drawText(view.text);
+  } else if (viewOnline && view.mode == "spotify") {
+    drawSpotify(now);
+  } else {
+    // eyes mode, or the offline/unknown fallback
+    const String mood = viewOnline ? view.mood : String("neutral");
+    if (mood != lastMood) {
+      lastMood = mood;
+      eyes.nextBlink = now;  // blink when the mood changes
     }
-    Serial.printf("mode=%s mood=%s text=%s title=%s failures=%u\n", state.mode.c_str(),
-                  state.mood.c_str(), state.text.c_str(), state.title.c_str(), failures);
-    render();
+    drawEyes(mood, now);
   }
+  display.display();
 }
