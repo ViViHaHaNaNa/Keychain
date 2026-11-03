@@ -35,7 +35,7 @@ export function ditherToBitmap(gray: Uint8Array, size = ART_SIZE): Buffer {
 }
 
 export async function artBitmap(url: string): Promise<Buffer> {
-  const key = `spotify:art:v2:${url.split("/").pop()}`;
+  const key = `spotify:art:v3:${url.split("/").pop()}`;
   const cached = await redis.get<string>(key);
   if (cached) return Buffer.from(cached, "base64");
 
@@ -45,9 +45,9 @@ export async function artBitmap(url: string): Promise<Buffer> {
     .resize(ART_SIZE, ART_SIZE, { fit: "cover" })
     .removeAlpha()
     .grayscale()
-    .clahe({ width: 16, height: 16, maxSlope: 3 }) // local contrast so detail survives 1-bit
-    .normalise()
-    .sharpen({ sigma: 0.8 })
+    .normalise({ lower: 2, upper: 98 })
+    .clahe({ width: 32, height: 32, maxSlope: 2 }) // gentle local contrast: keeps midtones instead of crushing them
+    .sharpen({ sigma: 0.6, m1: 1, m2: 2 })
     .raw()
     .toBuffer();
 

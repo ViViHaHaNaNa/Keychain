@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { safeEqual } from "@/lib/auth";
-import { artId, getNowPlaying } from "@/lib/spotify";
+import { artId, getNowPlaying, positionSeconds } from "@/lib/spotify";
 import { getState } from "@/lib/state";
 
 export const dynamic = "force-dynamic";
@@ -20,7 +20,16 @@ export async function GET(req: NextRequest) {
   // the album art does; fetch /api/art only when it differs from the last one.
   const np = await getNowPlaying();
   return NextResponse.json(
-    { ...state, text: np.text, title: np.title, artist: np.artist, art: artId(np.artUrl) },
+    {
+      ...state,
+      text: np.text,
+      title: np.title,
+      artist: np.artist,
+      art: artId(np.artUrl),
+      pos: positionSeconds(np), // seconds into the track; the device keeps counting while `play` is 1
+      dur: Math.round(np.durationMs / 1000),
+      play: np.playing ? 1 : 0,
+    },
     { headers },
   );
 }

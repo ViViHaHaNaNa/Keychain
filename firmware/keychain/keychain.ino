@@ -8,6 +8,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <ArduinoJson.h>
+#include <Fonts/Picopixel.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -43,6 +44,10 @@ struct State {
   String title;
   String artist;
   String art;
+  int pos = -1;  // seconds into the track
+  int dur = 0;   // track length in seconds
+  bool play = false;
+  uint32_t posAt = 0;  // millis() when pos was received
 };
 
 // Written by the network task, copied into the view* variables by the render loop.
@@ -106,6 +111,10 @@ bool fetchState(State& s) {
       s.title = ascii(doc["title"] | "");
       s.artist = ascii(doc["artist"] | "");
       s.art = doc["art"] | "";
+      s.pos = doc["pos"] | -1;
+      s.dur = doc["dur"] | 0;
+      s.play = (doc["play"] | 0) != 0;
+      s.posAt = millis();
       ok = true;
     }
   }
@@ -333,45 +342,80 @@ void drawText(const String& text) {
   display.print(text);
 }
 
-// Draws one 60px-wide line of text at x=68, scrolling it when it doesn't fit.
-void marquee(const String& s, int y, uint32_t now) {
+// Draws one line in the 60px column right of the art (x=68). Text shrinks to fit: the normal
+// 6px/char font first, then a 4px/char font. Only if it still doesn't fit does it scroll.
+void fitLine(const String& s, int y, uint32_t now) {
   constexpr int W = 60;
-  const int textW = s.length() * 6;
+  int16_t bx, by;
+  uint16_t tw, th;
+
   marqueeLine.fillScreen(0);
-  marqueeLine.setTextSize(1);
   marqueeLine.setTextColor(1);
+  marqueeLine.setTextSize(1);
   marqueeLine.setTextWrap(false);
-  if (textW <= W) {
-    marqueeLine.setCursor(0, 0);
+
+  int baseline = 0;  // the built-in font draws from the top, GFX fonts from the baseline
+  marqueeLine.setFont(nullptr);
+  marqueeLine.getTextBounds(s, 0, 0, &bx, &by, &tw, &th);
+  if (tw > W) {
+    baseline = 6;
+    marqueeLine.setFont(&Picopixel);
+    marqueeLine.getTextBounds(s, 0, baseline, &bx, &by, &tw, &th);
+  }
+
+  if (tw <= W) {
+    marqueeLine.setCursor(0, baseline);
     marqueeLine.print(s);
   } else {
-    const int span = textW + 24;
-    const int off = (now / 50) % span;
-    marqueeLine.setCursor(-off, 0);
+    const int span = tw + 16;
+    const int off = (now / 60) % span;
+    marqueeLine.setCursor(-off, baseline);
     marqueeLine.print(s);
-    marqueeLine.setCursor(-off + span, 0);
+    marqueeLine.setCursor(-off + span, baseline);
     marqueeLine.print(s);
   }
   display.drawBitmap(68, y, marqueeLine.getBuffer(), W, 8, SSD1306_WHITE, SSD1306_BLACK);
 }
 
-void drawSpotify(uint32_t now) {
-  // Status messages ("Nothing playing", ...) have no artist: show them full width.
-  if (view.artist.length() == 0) {
-    drawText(view.title);
-    return;
+// 10 blocks across the bottom of the right column fill up as the song plays.
+void drawProgress(uint32_t now) {
+  float pos = view.pos < 0 ? 0.0f : (float)view.pos;
+  if (view.play) pos += (now - view.posAt) / 1000.0f;
+  const float frac = constrain(pos / view.dur, 0.0f, 1.0f);
+  const int filled = (int)(frac * 10 + 0.5f);
+  for (int i = 0; i < 10; i++) {
+    if (i < filled) {
+      display.fillRect(68 + i * 6, 54, 4, 6, SSD1306_WHITE);
+    } else {
+      display.drawRect(68 + i * 6, 54, 4, 6, SSD1306_WHITE);
+    }
   }
+}
+
+void drawSpotify(uint32_t now) {
+  display.setFont(nullptr);
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
   if (viewArtValid) {
     display.drawBitmap(0, 0, viewArt, 64, 64, SSD1306_WHITE);
   } else {
-    display.drawRect(0, 0, 64, 64, SSD1306_WHITE);
+    display.drawRoundRect(0, 0, 64, 64, 4, SSD1306_WHITE);
+    display.setTextSize(2);
+    display.setCursor(2, 16);
+    display.print("ALBUM");
+    display.setCursor(14, 34);
+    display.print("ART");
+    display.setTextSize(1);
   }
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
+
   display.setCursor(68, 2);
-  display.print("PLAYING");
-  marquee(view.title, 20, now);
-  marquee(view.artist, 34, now);
+  display.print("LISTENING");
+  display.drawChar(122, 2, 13, SSD1306_WHITE, SSD1306_BLACK, 1);  // note glyph
+
+  fitLine(view.title, 20, now);
+  if (view.artist.length()) fitLine(view.artist, 34, now);
+  if (view.artist.length() && view.dur > 0) drawProgress(now);
 }
 
 // ---------- main ----------

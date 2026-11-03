@@ -10,6 +10,10 @@ export type NowPlaying = {
   title: string;
   artist: string;
   artUrl: string; // Spotify image URL, "" when there is none
+  progressMs: number;
+  durationMs: number; // 0 when unknown (status messages)
+  playing: boolean;
+  fetchedAt: number; // Date.now() when Spotify was asked, to advance progress while cached
 };
 
 function basicAuth() {
@@ -71,7 +75,22 @@ async function accessToken() {
   return token.access_token;
 }
 
-const status = (msg: string): NowPlaying => ({ text: msg, title: msg, artist: "", artUrl: "" });
+const status = (msg: string): NowPlaying => ({
+  text: msg,
+  title: msg,
+  artist: "",
+  artUrl: "",
+  progressMs: 0,
+  durationMs: 0,
+  playing: false,
+  fetchedAt: Date.now(),
+});
+
+// Playback position in seconds as of now, moving forward while the track is playing.
+export function positionSeconds(np: NowPlaying) {
+  const elapsed = np.playing ? Date.now() - np.fetchedAt : 0;
+  return Math.round(Math.min(np.durationMs, np.progressMs + elapsed) / 1000);
+}
 // The OLED font is ASCII-only: strip accents (é -> e) and straighten curly quotes.
 const fold = (s: string) =>
   s
@@ -102,16 +121,26 @@ export async function getNowPlaying(): Promise<NowPlaying> {
     } else if (!res.ok) {
       return status("Spotify error");
     } else {
-      const item = (await res.json())?.item;
+      const data = await res.json();
+      const item = data?.item;
       if (!item?.name) {
         result = status("Nothing playing");
       } else {
         const title = clip(fold(item.name));
         const artist = clip(fold((item.artists ?? []).map((a: { name: string }) => a.name).join(", ")));
-        // images are listed largest first; the middle one (~300px) is plenty for 64x64
+        // images are listed largest first; the largest gives the cleanest downscale to 64x64
         const images: { url: string }[] = item.album?.images ?? [];
-        const artUrl = (images[1] ?? images[0])?.url ?? "";
-        result = { text: clip(`${title} - ${artist}`), title, artist, artUrl };
+        const artUrl = images[0]?.url ?? "";
+        result = {
+          text: clip(`${title} - ${artist}`),
+          title,
+          artist,
+          artUrl,
+          progressMs: data.progress_ms ?? 0,
+          durationMs: item.duration_ms ?? 0,
+          playing: data.is_playing === true,
+          fetchedAt: Date.now(),
+        };
       }
     }
   } catch {
