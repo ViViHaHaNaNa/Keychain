@@ -541,15 +541,15 @@ void fitLine(const String& s, int y, uint32_t now, int firstFont = 0) {
   display.drawBitmap(68, y, marqueeLine.getBuffer(), W, 12, SSD1306_WHITE, SSD1306_BLACK);
 }
 
-// Plain loading bar along the bottom of the right column: an outline that fills as the song plays.
+// Loading bar along the bottom of the right column: a thin track with a thick bar filling it.
 void drawProgress(uint32_t now) {
   float pos = view.pos < 0 ? 0.0f : (float)view.pos;
   if (view.play) pos += (now - view.posAt) / 1000.0f;
   const float frac = constrain(pos / view.dur, 0.0f, 1.0f);
-  constexpr int X = 68, Y = 54, W = 60, H = 8;
-  display.drawRect(X, Y, W, H, SSD1306_WHITE);
-  const int fill = (int)((W - 4) * frac + 0.5f);
-  if (fill > 0) display.fillRect(X + 2, Y + 2, fill, H - 4, SSD1306_WHITE);
+  constexpr int X = 68, Y = 56, W = 60, H = 4;
+  display.drawFastHLine(X, Y + H / 2, W, SSD1306_WHITE);  // track, no border
+  const int fill = (int)(W * frac + 0.5f);
+  if (fill > 0) display.fillRect(X, Y, fill, H, SSD1306_WHITE);
 }
 
 // Thick eighth note, 6x10.

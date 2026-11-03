@@ -102,7 +102,8 @@ const fold = (s: string) =>
 const clip = (s: string) => (s.length > MAX_TEXT ? s.slice(0, MAX_TEXT - 3) + "..." : s);
 
 // Short id for an album image, sent to the ESP32 so it only re-downloads art when it changes.
-export const artId = (artUrl: string) => artUrl.split("/").pop() ?? "";
+// The suffix is the art-processing version: bump it to make every keychain download art again.
+export const artId = (artUrl: string) => (artUrl ? `${artUrl.split("/").pop()}.4` : "");
 
 // The result is cached for a few seconds so ESP32 polling doesn't hammer Spotify.
 export async function getNowPlaying(): Promise<NowPlaying> {
