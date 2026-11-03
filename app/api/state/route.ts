@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { safeEqual } from "@/lib/auth";
+import { nowPlayingText } from "@/lib/spotify";
 import { getState } from "@/lib/state";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +12,8 @@ export async function GET(req: NextRequest) {
   if (!expected || !key || !safeEqual(key, expected)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  return NextResponse.json(await getState(), {
-    headers: { "Cache-Control": "no-store" },
-  });
+  const state = await getState();
+  // In spotify mode the server fills `text` with the current track.
+  if (state.mode === "spotify") state.text = await nowPlayingText();
+  return NextResponse.json(state, { headers: { "Cache-Control": "no-store" } });
 }

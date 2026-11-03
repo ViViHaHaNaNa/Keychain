@@ -3,7 +3,12 @@
 import { useState } from "react";
 import { MAX_TEXT, MODES, MOODS, type State } from "@/lib/schema";
 
-const MODE_LABELS: Record<State["mode"], string> = { eyes: "👀 Eyes", clock: "🕒 Clock", text: "✏️ Text" };
+const MODE_LABELS: Record<State["mode"], string> = {
+  eyes: "👀 Eyes",
+  clock: "🕒 Clock",
+  text: "✏️ Text",
+  spotify: "🎵 Spotify",
+};
 const MOOD_LABELS: Record<State["mood"], string> = {
   happy: "😊 Happy",
   sad: "😢 Sad",
@@ -13,7 +18,13 @@ const MOOD_LABELS: Record<State["mood"], string> = {
   neutral: "😐 Neutral",
 };
 
-export default function Controls({ initial }: { initial: State }) {
+export default function Controls({
+  initial,
+  spotifyConnected,
+}: {
+  initial: State;
+  spotifyConnected: boolean;
+}) {
   const [state, setState] = useState(initial);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
@@ -40,7 +51,7 @@ export default function Controls({ initial }: { initial: State }) {
 
       <section className="card">
         <h2>Mode</h2>
-        <div className="grid three">
+        <div className="grid two">
           {MODES.map((m) => (
             <button key={m} className={state.mode === m ? "on" : ""} onClick={() => save({ ...state, mode: m })}>
               {MODE_LABELS[m]}
@@ -79,6 +90,19 @@ export default function Controls({ initial }: { initial: State }) {
           />
           <button className="primary">Send</button>
         </form>
+      )}
+
+      {state.mode === "spotify" && (
+        <section className="card">
+          <h2>Spotify</h2>
+          {spotifyConnected ? (
+            <p className="note">Connected. The keychain shows what's playing.</p>
+          ) : (
+            <a className="button primary" href="/api/spotify/login">
+              Connect Spotify
+            </a>
+          )}
+        </section>
       )}
 
       <p className="status" aria-live="polite">

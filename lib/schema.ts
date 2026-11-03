@@ -1,4 +1,4 @@
-export const MODES = ["eyes", "clock", "text"] as const;
+export const MODES = ["eyes", "clock", "text", "spotify"] as const;
 export const MOODS = ["happy", "sad", "angry", "sleepy", "surprised", "neutral"] as const;
 export const MAX_TEXT = 64;
 
