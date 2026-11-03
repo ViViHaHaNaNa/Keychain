@@ -16,7 +16,7 @@
 #include <Wire.h>
 #include <time.h>
 
-#include "Silkscreen8pt7b.h"
+#include "PixelPurl12pt7b.h"
 #include "secrets.h"
 
 // Optional in secrets.h: a second network (your phone hotspot) tried when the saved one fails.
@@ -36,7 +36,7 @@ constexpr uint8_t FAIL_LIMIT = 3;  // failed polls before falling back to eyes
 constexpr size_t ART_BYTES = 512;  // 64x64, 1 bit per pixel
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
-GFXcanvas1 marqueeLine(60, 8);
+GFXcanvas1 marqueeLine(60, 12);
 
 struct State {
   String mode = "eyes";
@@ -313,15 +313,19 @@ void drawEyes(const String& mood, uint32_t now) {
   }
 }
 
-// Centers one line across the whole screen in Silkscreen, dropping to Picopixel if it's too wide.
-void drawCentered(const String& s, int baseline) {
+// Fonts from biggest to smallest: a line uses the first one it fits in.
+// (PixelPurl turns to mush below 12px, so the next step down is the tiny Picopixel.)
+const GFXfont* const FONT_CHAIN[] = {&PixelPurl12pt7b, &Picopixel};
+constexpr int FONT_CHAIN_LEN = 2;
+
+// Centers one line across the whole screen, dropping to a smaller font if it's too wide.
+void drawCentered(const String& s, int baseline, int firstFont = 0) {
   int16_t bx, by;
   uint16_t tw, th;
-  display.setFont(&Silkscreen8pt7b);
-  display.getTextBounds(s, 0, baseline, &bx, &by, &tw, &th);
-  if (tw > 128) {
-    display.setFont(&Picopixel);
+  for (int i = firstFont; i < FONT_CHAIN_LEN; i++) {
+    display.setFont(FONT_CHAIN[i]);
     display.getTextBounds(s, 0, baseline, &bx, &by, &tw, &th);
+    if (tw <= 128) break;
   }
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(max(0, (128 - (int)tw) / 2 - bx), baseline);
@@ -383,7 +387,7 @@ void drawClock(const String& caption) {
   char date[32];
   snprintf(date, sizeof date, "%s  %d/%d/%02d", DAYS[t.tm_wday], t.tm_mday, t.tm_mon + 1, (t.tm_year + 1900) % 100);
   drawCentered(date, 45);
-  if (caption.length()) drawCentered(caption, 58);
+  if (caption.length()) drawCentered(caption, 59);
 }
 
 // ---------- full-screen text with animations ----------
@@ -503,9 +507,10 @@ void drawAnimText(const String& text, const String& anim, uint32_t now) {
   }
 }
 
-// Draws one line in the 60px column right of the art (x=68). Text shrinks to fit: Silkscreen
-// first, then the smaller Picopixel. Only if it still doesn't fit does it scroll.
-void fitLine(const String& s, int y, uint32_t now) {
+// Draws one line in the 60px column right of the art (x=68). Text shrinks to fit: it uses the
+// first font in FONT_CHAIN (from `firstFont`) that fits. Only if even the smallest is too wide
+// does it scroll.
+void fitLine(const String& s, int y, uint32_t now, int firstFont = 0) {
   constexpr int W = 60;
   int16_t bx, by;
   uint16_t tw, th;
@@ -515,12 +520,11 @@ void fitLine(const String& s, int y, uint32_t now) {
   marqueeLine.setTextSize(1);
   marqueeLine.setTextWrap(false);
 
-  const int baseline = 7;  // GFX fonts draw from the baseline; caps sit on rows 2-6 of the 8px line
-  marqueeLine.setFont(&Silkscreen8pt7b);
-  marqueeLine.getTextBounds(s, 0, baseline, &bx, &by, &tw, &th);
-  if (tw > W) {
-    marqueeLine.setFont(&Picopixel);
+  const int baseline = 9;  // GFX fonts draw from the baseline; letters sit on rows 1-9 of the 12px line
+  for (int i = firstFont; i < FONT_CHAIN_LEN; i++) {
+    marqueeLine.setFont(FONT_CHAIN[i]);
     marqueeLine.getTextBounds(s, 0, baseline, &bx, &by, &tw, &th);
+    if (tw <= W) break;
   }
 
   if (tw <= W) {
@@ -534,23 +538,22 @@ void fitLine(const String& s, int y, uint32_t now) {
     marqueeLine.setCursor(-off + span, baseline);
     marqueeLine.print(s);
   }
-  display.drawBitmap(68, y, marqueeLine.getBuffer(), W, 8, SSD1306_WHITE, SSD1306_BLACK);
+  display.drawBitmap(68, y, marqueeLine.getBuffer(), W, 12, SSD1306_WHITE, SSD1306_BLACK);
 }
 
-// 10 blocks across the bottom of the right column fill up as the song plays.
+// Plain loading bar along the bottom of the right column: an outline that fills as the song plays.
 void drawProgress(uint32_t now) {
   float pos = view.pos < 0 ? 0.0f : (float)view.pos;
   if (view.play) pos += (now - view.posAt) / 1000.0f;
   const float frac = constrain(pos / view.dur, 0.0f, 1.0f);
-  const int filled = (int)(frac * 10 + 0.5f);
-  for (int i = 0; i < 10; i++) {
-    if (i < filled) {
-      display.fillRect(68 + i * 6, 54, 4, 6, SSD1306_WHITE);
-    } else {
-      display.drawRect(68 + i * 6, 54, 4, 6, SSD1306_WHITE);
-    }
-  }
+  constexpr int X = 68, Y = 54, W = 60, H = 8;
+  display.drawRect(X, Y, W, H, SSD1306_WHITE);
+  const int fill = (int)((W - 4) * frac + 0.5f);
+  if (fill > 0) display.fillRect(X + 2, Y + 2, fill, H - 4, SSD1306_WHITE);
 }
+
+// Thick eighth note, 6x10.
+const uint8_t NOTE_ICON[] PROGMEM = {0x38, 0x3C, 0x34, 0x34, 0x30, 0x30, 0x70, 0xF0, 0xF0, 0x60};
 
 void drawSpotify(uint32_t now) {
   display.setFont(nullptr);
@@ -569,14 +572,18 @@ void drawSpotify(uint32_t now) {
     display.setTextSize(1);
   }
 
-  display.drawChar(120, 2, 13, SSD1306_WHITE, SSD1306_BLACK, 1);  // note glyph (built-in font)
-  display.setFont(&Silkscreen8pt7b);
-  display.setCursor(68, 8);
-  display.print("LISTENING");
+  int16_t bx, by;
+  uint16_t tw, th;
+  display.setFont(&PixelPurl12pt7b);
+  display.getTextBounds("Listening", 68, 9, &bx, &by, &tw, &th);
+  display.setCursor(68, 9);
+  display.print("Listening");
   display.setFont(nullptr);
+  const int bob = (int)roundf(sinf(now / 260.0f) * 1.5f);  // the note bobs up and down
+  display.drawBitmap(bx + (int)tw + 4, 1 + bob, NOTE_ICON, 6, 10, SSD1306_WHITE);
 
-  fitLine(view.title, 20, now);
-  if (view.artist.length()) fitLine(view.artist, 34, now);
+  fitLine(view.title, 16, now);
+  if (view.artist.length()) fitLine(view.artist, 31, now);
   if (view.artist.length() && view.dur > 0) drawProgress(now);
 }
 
