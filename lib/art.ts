@@ -3,8 +3,18 @@ import { redis } from "./state";
 
 export const ART_SIZE = 64;
 
-// 1-bit Floyd-Steinberg dither of a square grayscale image. Output is row-major,
-// MSB first, 1 = lit pixel: the layout Adafruit_GFX drawBitmap() expects.
+// Atkinson dither (the classic 1-bit Mac look) of a square grayscale image: it passes on only
+// 6/8 of the error, so it gives crisper, higher-contrast results than Floyd-Steinberg on tiny
+// screens. Output is row-major, MSB first, 1 = lit pixel: the layout Adafruit_GFX drawBitmap() expects.
+const ATKINSON_NEIGHBOURS = [
+  [1, 0],
+  [2, 0],
+  [-1, 1],
+  [0, 1],
+  [1, 1],
+  [0, 2],
+];
+
 export function ditherToBitmap(gray: Uint8Array, size = ART_SIZE): Buffer {
   const px = Float32Array.from(gray);
   const out = Buffer.alloc((size * size) / 8);
@@ -13,12 +23,11 @@ export function ditherToBitmap(gray: Uint8Array, size = ART_SIZE): Buffer {
       const i = y * size + x;
       const lit = px[i] >= 128;
       if (lit) out[i >> 3] |= 0x80 >> (i & 7);
-      const err = px[i] - (lit ? 255 : 0);
-      if (x + 1 < size) px[i + 1] += (err * 7) / 16;
-      if (y + 1 < size) {
-        if (x > 0) px[i + size - 1] += (err * 3) / 16;
-        px[i + size] += (err * 5) / 16;
-        if (x + 1 < size) px[i + size + 1] += err / 16;
+      const share = (px[i] - (lit ? 255 : 0)) / 8;
+      for (const [dx, dy] of ATKINSON_NEIGHBOURS) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx >= 0 && nx < size && ny < size) px[ny * size + nx] += share;
       }
     }
   }
@@ -26,7 +35,7 @@ export function ditherToBitmap(gray: Uint8Array, size = ART_SIZE): Buffer {
 }
 
 export async function artBitmap(url: string): Promise<Buffer> {
-  const key = `spotify:art:${url.split("/").pop()}`;
+  const key = `spotify:art:v2:${url.split("/").pop()}`;
   const cached = await redis.get<string>(key);
   if (cached) return Buffer.from(cached, "base64");
 
@@ -36,7 +45,9 @@ export async function artBitmap(url: string): Promise<Buffer> {
     .resize(ART_SIZE, ART_SIZE, { fit: "cover" })
     .removeAlpha()
     .grayscale()
+    .clahe({ width: 16, height: 16, maxSlope: 3 }) // local contrast so detail survives 1-bit
     .normalise()
+    .sharpen({ sigma: 0.8 })
     .raw()
     .toBuffer();
 
