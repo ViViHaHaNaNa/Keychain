@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { MAX_TEXT, MODES, MOODS, type State } from "@/lib/schema";
 
 const MODE_LABELS: Record<State["mode"], string> = {
@@ -27,6 +27,25 @@ export default function Controls({
 }) {
   const [state, setState] = useState(initial);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+
+  const [nowPlaying, setNowPlaying] = useState("…");
+  const previewSpotify = state.mode === "spotify" && spotifyConnected;
+
+  useEffect(() => {
+    if (!previewSpotify) return;
+    let cancelled = false;
+    async function poll() {
+      const res = await fetch("/api/now-playing").catch(() => null);
+      if (cancelled || !res?.ok) return;
+      setNowPlaying((await res.json()).text);
+    }
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [previewSpotify]);
 
   async function save(next: State) {
     setState(next);
@@ -96,7 +115,10 @@ export default function Controls({
         <section className="card">
           <h2>Spotify</h2>
           {spotifyConnected ? (
-            <p className="note">Connected. The keychain shows what's playing.</p>
+            <>
+              <p className="note">Connected. The keychain shows:</p>
+              <p className="now-playing">{nowPlaying}</p>
+            </>
           ) : (
             <a className="button primary" href="/api/spotify/login">
               Connect Spotify
