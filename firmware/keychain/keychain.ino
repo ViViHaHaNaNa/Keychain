@@ -19,6 +19,7 @@
 #include <esp_wifi.h>
 #include <time.h>
 
+#include "ClockFace.h"
 #include "secrets.h"
 
 // Optional in secrets.h: a second network (your phone hotspot) tried when the saved one fails.
@@ -57,14 +58,14 @@ struct State {
   uint32_t posAt = 0;  // millis() when pos was received
 };
 
-// Text styles from biggest to smallest. A line uses the first one it fits in. The classic 5x7
-// font (font = nullptr) is the clearest on this screen; Picopixel is only the last resort.
+// Text styles for the Spotify lines, biggest first. A line uses the first one it fits in. The
+// classic 5x7 font (font = nullptr) is the clearest on this screen; Picopixel is the last resort.
 struct Face {
   const GFXfont* font;
   uint8_t size;
 };
-const Face FACES[] = {{nullptr, 2}, {nullptr, 1}, {&Picopixel, 1}};
-constexpr int FACE_COUNT = 3;
+const Face FACES[] = {{nullptr, 1}, {&Picopixel, 1}};
+constexpr int FACE_COUNT = 2;
 
 void useFace(Adafruit_GFX& g, const Face& f) {
   g.setFont(f.font);
@@ -341,59 +342,28 @@ void drawEyes(const String& mood, uint32_t now) {
   }
 }
 
-// Centers one line across the whole screen, dropping to a smaller style if it's too wide.
+// Centers one line across the whole screen in the small caps font, or Picopixel if it's too wide.
 void drawCentered(const String& s, int baseline) {
   int16_t bx, by;
-  uint16_t tw = 0, th;
-  int face = 0;
-  for (; face < FACE_COUNT; face++) {
-    useFace(display, FACES[face]);
-    display.getTextBounds(s, 0, faceY(FACES[face], baseline), &bx, &by, &tw, &th);
-    if (tw <= 128) break;
+  uint16_t tw, th;
+  display.setFont(&ClockSmall);
+  display.getTextBounds(s, 0, baseline, &bx, &by, &tw, &th);
+  if (tw > 128) {
+    display.setFont(&Picopixel);
+    display.getTextBounds(s, 0, baseline, &bx, &by, &tw, &th);
   }
-  face = min(face, FACE_COUNT - 1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(max(0, (128 - (int)tw) / 2 - bx), faceY(FACES[face], baseline));
+  display.setCursor(max(0, (128 - (int)tw) / 2 - bx), baseline);
   display.print(s);
   display.setFont(nullptr);
-  display.setTextSize(1);
 }
 
 // ---------- clock ----------
 
-// Chunky 22x29 digits with 45-degree corner cuts, built from seven segments (a=1 ... g=64).
-constexpr int DIGIT_W = 22, DIGIT_H = 29, STROKE = 5, CUT = 2;
-const uint8_t SEGMENTS[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};
 const char* const DAYS[] = {"SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"};
 
-void cutRect(int x, int y, int w, int h, int cut = CUT) {
-  const uint16_t c = SSD1306_WHITE;
-  display.fillRect(x + cut, y, w - 2 * cut, h, c);
-  display.fillRect(x, y + cut, w, h - 2 * cut, c);
-  display.fillTriangle(x, y + cut, x + cut, y, x + cut, y + cut, c);
-  display.fillTriangle(x + w - 1, y + cut, x + w - 1 - cut, y, x + w - 1 - cut, y + cut, c);
-  display.fillTriangle(x, y + h - 1 - cut, x + cut, y + h - 1, x + cut, y + h - 1 - cut, c);
-  display.fillTriangle(x + w - 1, y + h - 1 - cut, x + w - 1 - cut, y + h - 1, x + w - 1 - cut, y + h - 1 - cut, c);
-}
-
 void drawBigDigit(int x, int y, int d) {
-  if (d == 1) {  // stem with a slanted flag and a base bar
-    cutRect(x + 9, y, STROKE, DIGIT_H);
-    display.fillTriangle(x + 9, y, x + 14, y, x + 8, y + 10, SSD1306_WHITE);
-    display.fillTriangle(x + 8, y + 10, x + 3, y + 10, x + 9, y, SSD1306_WHITE);
-    cutRect(x + 2, y + DIGIT_H - STROKE, DIGIT_W - 4, STROKE);
-    return;
-  }
-  const uint8_t s = SEGMENTS[d];
-  const int half = (DIGIT_H - STROKE) / 2;
-  const int vh = half + STROKE;
-  if (s & 1) cutRect(x, y, DIGIT_W, STROKE);                       // a: top
-  if (s & 2) cutRect(x + DIGIT_W - STROKE, y, STROKE, vh);         // b: top right
-  if (s & 4) cutRect(x + DIGIT_W - STROKE, y + half, STROKE, vh);  // c: bottom right
-  if (s & 8) cutRect(x, y + DIGIT_H - STROKE, DIGIT_W, STROKE);    // d: bottom
-  if (s & 16) cutRect(x, y + half, STROKE, vh);                    // e: bottom left
-  if (s & 32) cutRect(x, y, STROKE, vh);                           // f: top left
-  if (s & 64) cutRect(x, y + half, DIGIT_W, STROKE);               // g: middle
+  display.drawBitmap(x, y, CLOCK_DIGITS[d], CLOCK_DIGIT_W, CLOCK_DIGIT_H, SSD1306_WHITE);
 }
 
 void drawClock(const String& caption) {
@@ -402,18 +372,18 @@ void drawClock(const String& caption) {
     drawCentered("SYNCING TIME", 34);
     return;
   }
-  const int y = 3;
-  drawBigDigit(10, y, t.tm_hour / 10);
-  drawBigDigit(35, y, t.tm_hour % 10);
-  cutRect(60, y + 6, 7, 7, 1);  // colon: two chunky dots
-  cutRect(60, y + 16, 7, 7, 1);
-  drawBigDigit(70, y, t.tm_min / 10);
-  drawBigDigit(95, y, t.tm_min % 10);
+  const int y = 8;
+  drawBigDigit(5, y, t.tm_hour / 10);
+  drawBigDigit(29, y, t.tm_hour % 10);
+  display.fillRect(61, y + 10, 6, 6, SSD1306_WHITE);  // colon: two square dots
+  display.fillRect(61, y + 23, 6, 6, SSD1306_WHITE);
+  drawBigDigit(77, y, t.tm_min / 10);
+  drawBigDigit(101, y, t.tm_min % 10);
 
   char date[32];
   snprintf(date, sizeof date, "%s  %d/%d/%02d", DAYS[t.tm_wday], t.tm_mday, t.tm_mon + 1, (t.tm_year + 1900) % 100);
-  drawCentered(date, 45);
-  if (caption.length()) drawCentered(caption, 61);
+  drawCentered(date, 49);
+  if (caption.length()) drawCentered(caption, 59);
 }
 
 // ---------- full-screen text with animations ----------
@@ -541,7 +511,7 @@ void fitLine(const String& s, int y, uint32_t now, bool bold = false) {
   constexpr int BASELINE = 9;
   int16_t bx, by;
   uint16_t tw = 0, th;
-  int face = 1;  // start at normal size: the double-size style is too wide for this column
+  int face = 0;
 
   marqueeLine.fillScreen(0);
   marqueeLine.setTextColor(1);
@@ -605,10 +575,9 @@ void drawSpotify(uint32_t now) {
     display.setTextSize(1);
   }
 
-  display.setCursor(68, 2);
-  display.print("Listening");  // 54px wide, so the note fits right after it
+  display.drawBitmap(68, 2, LISTENING_LABEL, LISTENING_W, LISTENING_H, SSD1306_WHITE);
   const int bob = (int)roundf(sinf(now / 260.0f) * 1.5f);  // the note bobs up and down
-  display.drawBitmap(122, 1 + bob, NOTE_ICON, 6, 10, SSD1306_WHITE);
+  display.drawBitmap(68 + LISTENING_W + 3, 2 + bob, NOTE_ICON, 6, 10, SSD1306_WHITE);
 
   fitLine(view.title, 16, now, true);
   if (view.artist.length()) fitLine(view.artist, 31, now);
