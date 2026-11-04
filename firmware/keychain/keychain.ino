@@ -10,13 +10,15 @@
 #include <ArduinoJson.h>
 #include <Fonts/Picopixel.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
+#include <WiFiMulti.h>
 #include <Wire.h>
+#include <esp_wifi.h>
 #include <time.h>
 
-#include "PixelPurl12pt7b.h"
 #include "secrets.h"
 
 // Optional in secrets.h: a second network (your phone hotspot) tried when the saved one fails.
@@ -36,6 +38,8 @@ constexpr uint8_t FAIL_LIMIT = 3;  // failed polls before falling back to eyes
 constexpr size_t ART_BYTES = 512;  // 64x64, 1 bit per pixel
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
+WiFiMulti wifiMulti;
+Preferences wifiPrefs;
 GFXcanvas1 marqueeLine(60, 12);
 
 struct State {
@@ -52,6 +56,23 @@ struct State {
   bool play = false;
   uint32_t posAt = 0;  // millis() when pos was received
 };
+
+// Text styles from biggest to smallest. A line uses the first one it fits in. The classic 5x7
+// font (font = nullptr) is the clearest on this screen; Picopixel is only the last resort.
+struct Face {
+  const GFXfont* font;
+  uint8_t size;
+};
+const Face FACES[] = {{nullptr, 2}, {nullptr, 1}, {&Picopixel, 1}};
+constexpr int FACE_COUNT = 3;
+
+void useFace(Adafruit_GFX& g, const Face& f) {
+  g.setFont(f.font);
+  g.setTextSize(f.size);
+}
+
+// Cursor y for a baseline: the classic font draws from its top, GFX fonts from the baseline.
+int faceY(const Face& f, int baseline) { return f.font ? baseline : baseline - 7 * f.size; }
 
 // Written by the network task, copied into the view* variables by the render loop.
 SemaphoreHandle_t mu;
@@ -157,7 +178,7 @@ void netTask(void*) {
       sharedOnline = false;
       sharedVersion++;
       xSemaphoreGive(mu);
-      WiFi.reconnect();
+      wifiMulti.run(8000);  // rejoin whichever known network (home or hotspot) is in range
       vTaskDelay(pdMS_TO_TICKS(RECONNECT_MS));
       continue;
     }
@@ -202,34 +223,39 @@ void netTask(void*) {
   }
 }
 
-bool waitConnected(uint32_t ms) {
-  const uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < ms) delay(250);
-  return WiFi.status() == WL_CONNECTED;
-}
-
+// The home network is remembered in our own storage, so adding the phone hotspot as a second
+// network can never overwrite it. WiFiMulti joins whichever of the two is in range.
 void connectWifi() {
   WiFi.mode(WIFI_STA);
   show("Connecting...");
+  wifiPrefs.begin("wifi", false);
 
-  WiFi.begin();  // last saved network
-  if (waitConnected(10000)) return;
-
-  if (strlen(HOTSPOT_SSID)) {
-    show("Connecting...", HOTSPOT_SSID);
-    WiFi.persistent(false);  // don't overwrite the saved home network
-    WiFi.begin(HOTSPOT_SSID, HOTSPOT_PASS);
-    const bool ok = waitConnected(10000);
-    WiFi.persistent(true);
-    if (ok) return;
+  String ssid = wifiPrefs.getString("ssid", "");
+  String pass = wifiPrefs.getString("pass", "");
+  if (ssid.length() == 0) {  // first boot of this version: adopt the network the radio has saved
+    wifi_config_t conf;
+    if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK && conf.sta.ssid[0] &&
+        strcmp((const char*)conf.sta.ssid, HOTSPOT_SSID) != 0) {
+      ssid = (const char*)conf.sta.ssid;
+      pass = (const char*)conf.sta.password;
+      wifiPrefs.putString("ssid", ssid);
+      wifiPrefs.putString("pass", pass);
+    }
   }
+  if (ssid.length()) wifiMulti.addAP(ssid.c_str(), pass.c_str());
+  if (strlen(HOTSPOT_SSID)) wifiMulti.addAP(HOTSPOT_SSID, HOTSPOT_PASS);
+  if (wifiMulti.run(15000) == WL_CONNECTED) return;
 
-  // Nothing worked: open the "Keychain-Setup" hotspot so a network can be picked from a phone.
+  // Nothing known is in range: open the "Keychain-Setup" hotspot so a network can be picked from a phone.
   show("Wi-Fi setup:", "join Keychain-Setup", "then open 192.168.4.1");
   WiFiManager wm;
   wm.setConnectTimeout(15);
   wm.setConfigPortalTimeout(120);
-  wm.autoConnect("Keychain-Setup");
+  if (wm.autoConnect("Keychain-Setup") && WiFi.SSID() != HOTSPOT_SSID) {
+    wifiPrefs.putString("ssid", WiFi.SSID());
+    wifiPrefs.putString("pass", WiFi.psk());
+    wifiMulti.addAP(WiFi.SSID().c_str(), WiFi.psk().c_str());
+  }
 }
 
 void checkResetButton(uint32_t now) {
@@ -238,6 +264,8 @@ void checkResetButton(uint32_t now) {
     if (!downSince) downSince = now;
     if (now - downSince > 3000) {
       show("Forgetting Wi-Fi...");
+      wifiPrefs.begin("wifi", false);
+      wifiPrefs.clear();
       WiFiManager wm;
       wm.resetSettings();
       delay(500);
@@ -313,24 +341,22 @@ void drawEyes(const String& mood, uint32_t now) {
   }
 }
 
-// Fonts from biggest to smallest: a line uses the first one it fits in.
-// (PixelPurl turns to mush below 12px, so the next step down is the tiny Picopixel.)
-const GFXfont* const FONT_CHAIN[] = {&PixelPurl12pt7b, &Picopixel};
-constexpr int FONT_CHAIN_LEN = 2;
-
-// Centers one line across the whole screen, dropping to a smaller font if it's too wide.
-void drawCentered(const String& s, int baseline, int firstFont = 0) {
+// Centers one line across the whole screen, dropping to a smaller style if it's too wide.
+void drawCentered(const String& s, int baseline) {
   int16_t bx, by;
-  uint16_t tw, th;
-  for (int i = firstFont; i < FONT_CHAIN_LEN; i++) {
-    display.setFont(FONT_CHAIN[i]);
-    display.getTextBounds(s, 0, baseline, &bx, &by, &tw, &th);
+  uint16_t tw = 0, th;
+  int face = 0;
+  for (; face < FACE_COUNT; face++) {
+    useFace(display, FACES[face]);
+    display.getTextBounds(s, 0, faceY(FACES[face], baseline), &bx, &by, &tw, &th);
     if (tw <= 128) break;
   }
+  face = min(face, FACE_COUNT - 1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(max(0, (128 - (int)tw) / 2 - bx), baseline);
+  display.setCursor(max(0, (128 - (int)tw) / 2 - bx), faceY(FACES[face], baseline));
   display.print(s);
   display.setFont(nullptr);
+  display.setTextSize(1);
 }
 
 // ---------- clock ----------
@@ -387,7 +413,7 @@ void drawClock(const String& caption) {
   char date[32];
   snprintf(date, sizeof date, "%s  %d/%d/%02d", DAYS[t.tm_wday], t.tm_mday, t.tm_mon + 1, (t.tm_year + 1900) % 100);
   drawCentered(date, 45);
-  if (caption.length()) drawCentered(caption, 59);
+  if (caption.length()) drawCentered(caption, 61);
 }
 
 // ---------- full-screen text with animations ----------
@@ -507,36 +533,43 @@ void drawAnimText(const String& text, const String& anim, uint32_t now) {
   }
 }
 
-// Draws one line in the 60px column right of the art (x=68). Text shrinks to fit: it uses the
-// first font in FONT_CHAIN (from `firstFont`) that fits. Only if even the smallest is too wide
-// does it scroll.
-void fitLine(const String& s, int y, uint32_t now, int firstFont = 0) {
+// Draws one line in the 60px column right of the art (x=68). Text shrinks to fit: normal size
+// first, then the tiny Picopixel. Only if even that is too wide does it scroll. `bold` thickens
+// the classic font by drawing it twice, one pixel apart, which reads better on the OLED.
+void fitLine(const String& s, int y, uint32_t now, bool bold = false) {
   constexpr int W = 60;
+  constexpr int BASELINE = 9;
   int16_t bx, by;
-  uint16_t tw, th;
+  uint16_t tw = 0, th;
+  int face = 1;  // start at normal size: the double-size style is too wide for this column
 
   marqueeLine.fillScreen(0);
   marqueeLine.setTextColor(1);
-  marqueeLine.setTextSize(1);
   marqueeLine.setTextWrap(false);
-
-  const int baseline = 9;  // GFX fonts draw from the baseline; letters sit on rows 1-9 of the 12px line
-  for (int i = firstFont; i < FONT_CHAIN_LEN; i++) {
-    marqueeLine.setFont(FONT_CHAIN[i]);
-    marqueeLine.getTextBounds(s, 0, baseline, &bx, &by, &tw, &th);
+  for (; face < FACE_COUNT; face++) {
+    useFace(marqueeLine, FACES[face]);
+    marqueeLine.getTextBounds(s, 0, faceY(FACES[face], BASELINE), &bx, &by, &tw, &th);
     if (tw <= W) break;
   }
+  face = min(face, FACE_COUNT - 1);
+  const int cy = faceY(FACES[face], BASELINE);
+  const bool thick = bold && FACES[face].font == nullptr;
 
-  if (tw <= W) {
-    marqueeLine.setCursor(0, baseline);
+  auto draw = [&](int x) {
+    marqueeLine.setCursor(x, cy);
     marqueeLine.print(s);
+    if (thick) {
+      marqueeLine.setCursor(x + 1, cy);
+      marqueeLine.print(s);
+    }
+  };
+  if ((int)tw + (thick ? 1 : 0) <= W) {
+    draw(0);
   } else {
     const int span = tw + 16;
     const int off = (now / 60) % span;
-    marqueeLine.setCursor(-off, baseline);
-    marqueeLine.print(s);
-    marqueeLine.setCursor(-off + span, baseline);
-    marqueeLine.print(s);
+    draw(-off);
+    draw(-off + span);
   }
   display.drawBitmap(68, y, marqueeLine.getBuffer(), W, 12, SSD1306_WHITE, SSD1306_BLACK);
 }
@@ -572,17 +605,12 @@ void drawSpotify(uint32_t now) {
     display.setTextSize(1);
   }
 
-  int16_t bx, by;
-  uint16_t tw, th;
-  display.setFont(&PixelPurl12pt7b);
-  display.getTextBounds("Listening", 68, 9, &bx, &by, &tw, &th);
-  display.setCursor(68, 9);
-  display.print("Listening");
-  display.setFont(nullptr);
+  display.setCursor(68, 2);
+  display.print("Listening");  // 54px wide, so the note fits right after it
   const int bob = (int)roundf(sinf(now / 260.0f) * 1.5f);  // the note bobs up and down
-  display.drawBitmap(bx + (int)tw + 4, 1 + bob, NOTE_ICON, 6, 10, SSD1306_WHITE);
+  display.drawBitmap(122, 1 + bob, NOTE_ICON, 6, 10, SSD1306_WHITE);
 
-  fitLine(view.title, 16, now);
+  fitLine(view.title, 16, now, true);
   if (view.artist.length()) fitLine(view.artist, 31, now);
   if (view.artist.length() && view.dur > 0) drawProgress(now);
 }
