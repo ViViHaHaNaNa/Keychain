@@ -396,55 +396,46 @@ struct Glyph {
 Glyph glyphs[MAX_GLYPHS];
 int glyphCount = 0;
 int glyphSize = 1;
+int glyphScrollW = 0;  // width of the text when it's too wide for the screen, else 0
 String glyphsFor;
 
-// Picks the largest font size (1-4) whose word-wrapped text fits the screen, centers it, and
-// stores each letter's position so the animations can move letters individually.
+// Lines break only where the text has a line break, never automatically. Picks the largest font
+// size (1-4) that fits, centers it, and stores each letter's position so the animations can move
+// letters individually. A line too wide even at size 1 stays on one line and scrolls.
 void layoutText(const String& text) {
   if (text == glyphsFor) return;
   glyphsFor = text;
   glyphCount = 0;
-  const int n = text.length();
+  glyphScrollW = 0;
 
-  for (int size = 4; size >= 1; size--) {
-    const int cw = 6 * size, ch = 8 * size;
-    const int cols = 128 / cw, rows = 64 / ch;
-    int lineStart[8], lineLen[8], lines = 0;
-
-    for (int i = 0; i < n;) {
-      while (i < n && text[i] == ' ') i++;
-      if (i >= n) break;
-      int len = min(cols, n - i);
-      if (i + len < n && text[i + len] != ' ') {  // this would split a word: back up to a space
-        int sp = len;
-        while (sp > 0 && text[i + sp - 1] != ' ') sp--;
-        if (sp > 0) len = sp;
-      }
-      int end = len;
-      while (end > 0 && text[i + end - 1] == ' ') end--;
-      if (lines < 8) {
-        lineStart[lines] = i;
-        lineLen[lines] = end;
-      }
-      lines++;
-      i += len;
-    }
-
-    if (lines > rows && size > 1) continue;  // too big: try a smaller size
-    const int used = min(min(lines, rows), 8);
-    const int y0 = (64 - used * ch) / 2;
-    for (int l = 0; l < used; l++) {
-      const int x0 = (128 - lineLen[l] * cw) / 2;
-      for (int k = 0; k < lineLen[l]; k++) {
-        const char c = text[lineStart[l] + k];
-        if (c != ' ' && glyphCount < MAX_GLYPHS) {
-          glyphs[glyphCount++] = {c, (int16_t)(x0 + k * cw), (int16_t)(y0 + l * ch)};
-        }
-      }
-    }
-    glyphSize = size;
-    return;
+  int lineStart[8], lineLen[8], lines = 0, longest = 0;
+  for (int i = 0; i <= (int)text.length() && lines < 8;) {
+    int end = text.indexOf('\n', i);
+    if (end < 0) end = text.length();
+    lineStart[lines] = i;
+    lineLen[lines] = end - i;
+    longest = max(longest, end - i);
+    lines++;
+    i = end + 1;
   }
+  while (lines > 1 && lineLen[lines - 1] == 0) lines--;  // ignore trailing line breaks
+
+  int size = 4;
+  while (size > 1 && (longest * 6 * size > 128 + size || lines * 8 * size > 64)) size--;
+  const int cw = 6 * size, ch = 8 * size;
+  if (longest * cw > 128 + size) glyphScrollW = longest * cw;
+
+  const int y0 = (64 - lines * ch) / 2;
+  for (int l = 0; l < lines; l++) {
+    const int x0 = glyphScrollW ? 0 : (128 - lineLen[l] * cw) / 2;
+    for (int k = 0; k < lineLen[l]; k++) {
+      const char c = text[lineStart[l] + k];
+      if (c != ' ' && glyphCount < MAX_GLYPHS) {
+        glyphs[glyphCount++] = {c, (int16_t)(x0 + k * cw), (int16_t)(y0 + l * ch)};
+      }
+    }
+  }
+  glyphSize = size;
 }
 
 void drawAnimText(const String& text, const String& anim, uint32_t now) {
@@ -476,9 +467,10 @@ void drawAnimText(const String& text, const String& anim, uint32_t now) {
     glitching = now < glitchUntil;
   }
 
+  const int scrollX = glyphScrollW ? 128 - (int)((now / 30) % (glyphScrollW + 128)) : 0;
   const int hop = sz == 1 ? 4 : (sz == 2 ? 6 : 8);
   for (int i = 0; i < shown; i++) {
-    int x = glyphs[i].x, y = glyphs[i].y;
+    int x = glyphs[i].x + scrollX, y = glyphs[i].y;
     char c = glyphs[i].c;
     if (anim == "wave") {
       y += (int)(sinf(now / 220.0f + i * 0.7f) * (1 + sz));
@@ -494,7 +486,7 @@ void drawAnimText(const String& text, const String& anim, uint32_t now) {
   }
 
   if (anim == "typewriter" && shown < glyphCount && (now / 400) % 2 == 0) {  // blinking cursor
-    display.fillRect(glyphs[shown].x, glyphs[shown].y + 7 * sz, 5 * sz, sz, fg);
+    display.fillRect(glyphs[shown].x + scrollX, glyphs[shown].y + 7 * sz, 5 * sz, sz, fg);
   }
   if (glitching) {
     for (int k = 0; k < 3; k++) {

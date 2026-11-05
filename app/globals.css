@@ -54,6 +54,16 @@ button, input, select {
   padding: 0 12px;
 }
 input, select { width: 100%; }
+textarea {
+  font: inherit;
+  color: inherit;
+  width: 100%;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  resize: vertical;
+}
 label.field { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 0.85rem; }
 select { text-transform: capitalize; }
 button { cursor: pointer; }

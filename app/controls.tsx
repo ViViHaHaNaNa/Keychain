@@ -101,12 +101,14 @@ export default function Controls({
           }}
         >
           <h2>Text</h2>
-          <input
+          <textarea
+            rows={3}
             value={state.text}
             maxLength={MAX_TEXT}
             placeholder="What should it say?"
             onChange={(e) => setState({ ...state, text: e.target.value })}
           />
+          <p className="note">Lines only break where you press Enter.</p>
           <label className="field">
             Animation
             <select value={state.anim} onChange={(e) => save({ ...state, anim: e.target.value as State["anim"] })}>
