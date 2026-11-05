@@ -1,13 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ANIMS, MAX_CAPTION, MAX_TEXT, MODES, MOODS, type State } from "@/lib/schema";
+import { ANIMS, MAX_CAPTION, MAX_TEXT, MODES, MOODS, TEXT_SIZES, type State } from "@/lib/schema";
 
 const MODE_LABELS: Record<State["mode"], string> = {
   eyes: "👀 Eyes",
   clock: "🕒 Clock",
   text: "✏️ Text",
   spotify: "🎵 Spotify",
+};
+const SIZE_LABELS: Record<State["size"], string> = {
+  0: "Auto (biggest that fits)",
+  1: "1 - Small",
+  2: "2 - Medium",
+  3: "3 - Large",
+  4: "4 - Huge",
 };
 const MOOD_LABELS: Record<State["mood"], string> = {
   happy: "😊 Happy",
@@ -109,6 +116,19 @@ export default function Controls({
             onChange={(e) => setState({ ...state, text: e.target.value })}
           />
           <p className="note">Lines only break where you press Enter.</p>
+          <label className="field">
+            Font size
+            <select
+              value={state.size}
+              onChange={(e) => save({ ...state, size: Number(e.target.value) as State["size"] })}
+            >
+              {TEXT_SIZES.map((s) => (
+                <option key={s} value={s}>
+                  {SIZE_LABELS[s]}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="field">
             Animation
             <select value={state.anim} onChange={(e) => save({ ...state, anim: e.target.value as State["anim"] })}>

@@ -51,6 +51,7 @@ struct State {
   String artist;
   String art;
   String anim = "none";
+  int size = 0;  // text mode font size, 1-4; 0 = biggest that fits
   String caption;
   int pos = -1;  // seconds into the track
   int dur = 0;   // track length in seconds
@@ -137,6 +138,7 @@ bool fetchState(State& s) {
       s.artist = ascii(doc["artist"] | "");
       s.art = doc["art"] | "";
       s.anim = doc["anim"] | "none";
+      s.size = doc["size"] | 0;
       s.caption = ascii(doc["caption"] | "");
       s.pos = doc["pos"] | -1;
       s.dur = doc["dur"] | 0;
@@ -398,13 +400,16 @@ int glyphCount = 0;
 int glyphSize = 1;
 int glyphScrollW = 0;  // width of the text when it's too wide for the screen, else 0
 String glyphsFor;
+int glyphsForSize = -1;
 
-// Lines break only where the text has a line break, never automatically. Picks the largest font
-// size (1-4) that fits, centers it, and stores each letter's position so the animations can move
-// letters individually. A line too wide even at size 1 stays on one line and scrolls.
-void layoutText(const String& text) {
-  if (text == glyphsFor) return;
+// Lines break only where the text has a line break, never automatically. Uses the chosen font
+// size, or with 0 the largest (1-4) that fits, centers it, and stores each letter's position so
+// the animations can move letters individually. A line too wide for its size stays on one line
+// and scrolls.
+void layoutText(const String& text, int chosenSize) {
+  if (text == glyphsFor && chosenSize == glyphsForSize) return;
   glyphsFor = text;
+  glyphsForSize = chosenSize;
   glyphCount = 0;
   glyphScrollW = 0;
 
@@ -420,8 +425,10 @@ void layoutText(const String& text) {
   }
   while (lines > 1 && lineLen[lines - 1] == 0) lines--;  // ignore trailing line breaks
 
-  int size = 4;
-  while (size > 1 && (longest * 6 * size > 128 + size || lines * 8 * size > 64)) size--;
+  int size = chosenSize >= 1 && chosenSize <= 4 ? chosenSize : 4;
+  if (size != chosenSize) {
+    while (size > 1 && (longest * 6 * size > 128 + size || lines * 8 * size > 64)) size--;
+  }
   const int cw = 6 * size, ch = 8 * size;
   if (longest * cw > 128 + size) glyphScrollW = longest * cw;
 
@@ -438,8 +445,8 @@ void layoutText(const String& text) {
   glyphSize = size;
 }
 
-void drawAnimText(const String& text, const String& anim, uint32_t now) {
-  layoutText(text);
+void drawAnimText(const String& text, const String& anim, int chosenSize, uint32_t now) {
+  layoutText(text, chosenSize);
   if (glyphCount == 0) {
     drawCentered("NO TEXT SET", 34);
     return;
@@ -627,7 +634,7 @@ void loop() {
   if (viewOnline && view.mode == "clock") {
     drawClock(view.caption);
   } else if (viewOnline && view.mode == "text") {
-    drawAnimText(view.text, view.anim, now);
+    drawAnimText(view.text, view.anim, view.size, now);
   } else if (viewOnline && view.mode == "spotify") {
     drawSpotify(now);
   } else {
